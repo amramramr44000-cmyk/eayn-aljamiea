@@ -1,11 +1,9 @@
--- إصلاح حساب إداري موجود بالفعل في Auth.
--- غيّر البريد واسم المستخدم والقيم عند الحاجة ثم Run.
--- ملاحظة: هذا يعتمد على أن حساب Auth موجود بالفعل بنفس البريد.
-
+-- إصلاح حساب الإدارة الحالي إذا تم إنشاؤه قبل النسخة الجديدة.
+-- نفّذ هذا فقط للحساب الذي تملكه. غيّر amr إذا كان اسم المستخدم مختلفًا.
 update public.profiles
-set role='admin', account_status='approved', approved_at=now(), username='amr'
-where lower(email)=lower('amramramr0044@gmail.com');
+set role='admin', account_status='approved', approved_at=coalesce(approved_at, now()), rejection_reason=null
+where lower(username)=lower('amr');
 
-select id,email,username,role,account_status
+select id, username, email, role, account_status
 from public.profiles
-where lower(email)=lower('amramramr0044@gmail.com');
+where lower(username)=lower('amr');
