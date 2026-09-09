@@ -4,7 +4,7 @@ window.sb = supabaseClient;
 
 window.SANAD = {
   categories: ['الأمن', 'الإسعافات الطبية', 'الصيانة', 'الخدمات', 'الشكوى'],
-  categoryIcons: { 'الأمن':'shield', 'الإسعافات الطبية':'medical_services', 'الصيانة':'build', 'الخدمات':'miscellaneous_services', 'الشكوى':'flag' },
+  categoryIcons: { 'الأمن':'shield', 'الإسعافات الطبية':'medical_services', 'الصيانة':'build', 'الخدمات':'apps', 'الشكوى':'flag' },
   categorySlug: { 'الأمن':'security', 'الإسعافات الطبية':'medical', 'الصيانة':'maintenance', 'الخدمات':'services', 'الشكوى':'complaints' },
   statusLabels: {
     submitted: 'تم الاستلام',

@@ -42,33 +42,18 @@ begin
 end $$;
 
 
--- إصلاح إنشاء حسابات الإدارة: حسابات تطبيق الإدارة تُحفظ مباشرة كـ admin/staff معتمدة.
+-- التسجيل من Auth لا يمنح أي دور إداري اعتمادًا على metadata القادمة من المتصفح.
+-- كل مستخدم جديد يبدأ كطالب pending، والترقية الإدارية تمر عبر RPC محمي.
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path=public as $$
 declare
-  requested_role text := lower(coalesce(new.raw_user_meta_data->>'role','student'));
-  requested_center text := new.raw_user_meta_data->>'center_category';
-  is_admin_signup boolean := coalesce((new.raw_user_meta_data->>'admin_registration')::boolean,false);
-  final_role text := case when is_admin_signup and requested_role in ('admin','staff') then requested_role else 'student' end;
-  final_status text := case when final_role in ('admin','staff') then 'approved' else 'pending' end;
+  requested_username text := lower(nullif(trim(new.raw_user_meta_data->>'username'),''));
 begin
   insert into public.profiles(id,email,username,full_name,role,center_category,account_status,approved_at)
-  values(
-    new.id,
-    new.email,
-    lower(nullif(new.raw_user_meta_data->>'username','')),
-    coalesce(new.raw_user_meta_data->>'full_name',''),
-    final_role,
-    case when final_role='staff' then requested_center else null end,
-    final_status,
-    case when final_status='approved' then now() else null end
-  )
+  values(new.id,new.email,requested_username,coalesce(new.raw_user_meta_data->>'full_name',''),'student',null,'pending',null)
   on conflict (id) do update set
-    email=excluded.email, username=excluded.username, full_name=excluded.full_name,
-    role=excluded.role, center_category=excluded.center_category,
-    account_status=excluded.account_status, approved_at=excluded.approved_at;
+    email=excluded.email, username=excluded.username, full_name=excluded.full_name;
   return new;
 end;
 $$;
 
--- ملاحظة: هذا يجعل التسجيل الإداري المباشر متاحًا من تطبيق الإدارة. في الإنتاج يفضّل إضافة دعوة/كود إداري أو إنشاء الحساب عبر Edge Function بصلاحيات خادمية.

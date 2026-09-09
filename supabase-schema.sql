@@ -23,7 +23,8 @@ create table if not exists public.profiles (
   approved_at timestamptz,
   rejected_at timestamptz,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  avatar_url text
 );
 
 create table if not exists public.reports (
@@ -99,6 +100,34 @@ end;
 $$;
 grant execute on function public.create_report_code() to authenticated;
 
+create or replace function public.is_approved_student(uid uuid default auth.uid())
+returns boolean language sql stable security definer set search_path=public as $$
+  select exists(select 1 from public.profiles p where p.id=uid and p.role='student' and p.account_status='approved');
+$$;
+revoke all on function public.is_approved_student(uuid) from public;
+grant execute on function public.is_approved_student(uuid) to authenticated;
+
+create or replace function public.create_student_report(
+  p_public_code text, p_category text, p_title text, p_description text,
+  p_reporter_phone text default null, p_photo_paths text[] default '{}'::text[]
+)
+returns public.reports language plpgsql security definer set search_path=public as $$
+declare inserted_report public.reports;
+begin
+  if auth.uid() is null or not public.is_approved_student(auth.uid()) then
+    raise exception 'الحساب غير مصرح لإرسال البلاغات.';
+  end if;
+  if p_category not in ('الأمن','الإسعافات الطبية','الصيانة','الخدمات','الشكوى') then raise exception 'مسار البلاغ غير صالح.'; end if;
+  if length(trim(coalesce(p_description,''))) < 10 then raise exception 'تفاصيل المشكلة قصيرة جدًا.'; end if;
+  insert into public.reports(public_code,reporter_id,category,title,description,reporter_phone,photo_paths,status)
+  values(p_public_code,auth.uid(),p_category,coalesce(nullif(trim(p_title),''),'بلاغ'),trim(p_description),p_reporter_phone,coalesce(p_photo_paths,'{}'::text[]),'submitted')
+  returning * into inserted_report;
+  return inserted_report;
+end; $$;
+revoke all on function public.create_student_report(text,text,text,text,text,text[]) from public;
+grant execute on function public.create_student_report(text,text,text,text,text,text[]) to authenticated;
+
+
 create or replace function public.touch_updated_at()
 returns trigger language plpgsql as $$ begin new.updated_at=now(); return new; end; $$;
 drop trigger if exists trg_profiles_updated on public.profiles;
@@ -108,17 +137,18 @@ create trigger trg_profiles_updated before update on public.profiles for each ro
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path=public as $$
 declare
-  requested_role text := lower(coalesce(new.raw_user_meta_data->>'role','student'));
-  requested_center text := new.raw_user_meta_data->>'center_category';
-  is_admin_signup boolean := coalesce((new.raw_user_meta_data->>'admin_registration')::boolean,false);
-  final_role text := case when is_admin_signup and requested_role in ('admin','staff') then requested_role else 'student' end;
-  final_status text := case when final_role in ('admin','staff') then 'approved' else 'pending' end;
+  requested_username text := lower(nullif(trim(new.raw_user_meta_data->>'username'),''));
+  requested_center text := nullif(trim(new.raw_user_meta_data->>'center_category'),'');
+  -- Never trust role/admin flags supplied from the browser. Every new Auth user
+  -- starts as a pending student; privileged promotion is handled by a guarded RPC.
+  final_role text := 'student';
+  final_status text := 'pending';
 begin
   insert into public.profiles(id,email,username,full_name,role,center_category,account_status,approved_at)
   values(
     new.id,
     new.email,
-    lower(nullif(new.raw_user_meta_data->>'username','')),
+    requested_username,
     coalesce(new.raw_user_meta_data->>'full_name',''),
     final_role,
     case when final_role='staff' then requested_center else null end,
@@ -154,6 +184,11 @@ drop policy if exists profiles_insert on public.profiles;
 create policy profiles_insert on public.profiles for insert to authenticated with check (id=auth.uid() and role='student');
 drop policy if exists profiles_admin_update on public.profiles;
 create policy profiles_admin_update on public.profiles for update to authenticated using (public.is_admin()) with check (public.is_admin());
+-- الطالب يستطيع استكمال بيانات ملفه فقط وهو ما يزال pending؛ لا يستطيع اعتماد نفسه.
+drop policy if exists profiles_student_pending_update on public.profiles;
+create policy profiles_student_pending_update on public.profiles for update to authenticated
+using (id=auth.uid() and role='student' and account_status='pending')
+with check (id=auth.uid() and role='student' and account_status='pending');
 
 -- Reports
  drop policy if exists reports_select on public.reports;
@@ -163,7 +198,7 @@ create policy reports_select on public.reports for select to authenticated using
   or (public.is_staff() and (assigned_staff_id=auth.uid() or (assigned_staff_id is null and category=(select p.center_category from public.profiles p where p.id=auth.uid()))))
 );
 drop policy if exists reports_insert on public.reports;
-create policy reports_insert on public.reports for insert to authenticated with check (reporter_id=auth.uid() and exists(select 1 from public.profiles p where p.id=auth.uid() and p.role='student' and p.account_status='approved'));
+create policy reports_insert on public.reports for insert to authenticated with check (reporter_id=auth.uid() and public.is_approved_student(auth.uid()));
 drop policy if exists reports_admin_update on public.reports;
 create policy reports_admin_update on public.reports for update to authenticated using (public.is_admin()) with check (public.is_admin());
 drop policy if exists reports_staff_update on public.reports;
@@ -197,7 +232,8 @@ create policy rewards_admin on public.rewards for all to authenticated using (pu
 insert into storage.buckets(id,name,public) values
  ('id-documents','id-documents',false),
  ('report-photos','report-photos',false),
- ('resolution-photos','resolution-photos',false)
+ ('resolution-photos','resolution-photos',false),
+ ('avatars','avatars',true)
 on conflict (id) do nothing;
 
 -- Storage permissions. First folder in each path is the user id.
@@ -232,6 +268,39 @@ drop policy if exists resolution_photos_insert on storage.objects;
 create policy resolution_photos_insert on storage.objects for insert to authenticated with check (
   bucket_id='resolution-photos' and public.is_staff() and (storage.foldername(name))[1]=auth.uid()::text
 );
+
+
+
+-- Public profile avatars. The URL is public by design; profile data remains protected by RLS.
+drop policy if exists avatars_insert on storage.objects;
+create policy avatars_insert on storage.objects for insert to authenticated with check (
+  bucket_id='avatars' and (storage.foldername(name))[1]=auth.uid()::text
+);
+drop policy if exists avatars_update on storage.objects;
+create policy avatars_update on storage.objects for update to authenticated using (
+  bucket_id='avatars' and (storage.foldername(name))[1]=auth.uid()::text
+) with check (
+  bucket_id='avatars' and (storage.foldername(name))[1]=auth.uid()::text
+);
+drop policy if exists avatars_delete on storage.objects;
+create policy avatars_delete on storage.objects for delete to authenticated using (
+  bucket_id='avatars' and (storage.foldername(name))[1]=auth.uid()::text
+);
+
+create or replace function public.set_profile_avatar(p_avatar_url text)
+returns public.profiles language plpgsql security definer set search_path=public as $$
+declare updated_profile public.profiles;
+begin
+  if auth.uid() is null then raise exception 'يجب تسجيل الدخول.'; end if;
+  if p_avatar_url is null or length(trim(p_avatar_url)) < 10 then raise exception 'رابط الصورة غير صالح.'; end if;
+  update public.profiles set avatar_url=trim(p_avatar_url), updated_at=now()
+  where id=auth.uid()
+  returning * into updated_profile;
+  if updated_profile.id is null then raise exception 'تعذر تحديث صورة الملف.'; end if;
+  return updated_profile;
+end; $$;
+revoke all on function public.set_profile_avatar(text) from public;
+grant execute on function public.set_profile_avatar(text) to authenticated;
 
 -- Realtime
 do $$
